@@ -17,7 +17,6 @@
 - [mordomo-orchestrator](https://github.com/AslamSys/mordomo-orchestrator)
 - [mordomo-brain](https://github.com/AslamSys/mordomo-brain)
 - [mordomo-system-watchdog](https://github.com/AslamSys/mordomo-system-watchdog)
-- [mordomo-dashboard-ui](https://github.com/AslamSys/mordomo-dashboard-ui)
 - [mordomo-openclaw-agent](https://github.com/AslamSys/mordomo-openclaw-agent)
 
 ---
@@ -870,7 +869,6 @@ nats pub error.critical '{"message": "Out of memory"}'
 - Configuração estática (YAML)
 
 ### Fase 2 (Melhorias)
-- Dashboard web para testar efeitos ao vivo
 - Suporte a múltiplos rings (multi-room)
 - Configuração dinâmica via NATS
 - Efeitos customizados por usuário
@@ -893,7 +891,6 @@ nats pub error.critical '{"message": "Out of memory"}'
 ### Módulos Opcionais
 - **IoT**: Para feedback de dispositivos
 - **Security**: Para alertas visuais
-- **Dashboard UI**: Para configuração visual
 
 ---
 
