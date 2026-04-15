@@ -458,6 +458,104 @@ Interval: A cada 60 segundos
 
 ---
 
+## 📡 Protocolo `visual.register`
+
+O Visual Feedback não precisa conhecer os serviços de antemão. Cada serviço **registra suas próprias regras visuais** publicando em `visual.register` ao iniciar. As regras são persistidas no **Redis db3** e recarregadas no próximo boot.
+
+### Quando publicar
+
+- No **startup** do serviço (após conectar ao NATS)
+- Sempre que as regras mudarem (re-publicar sobrescreve)
+
+### Payload
+
+```json
+{
+  "service": "wake-word-detector",
+  "rules": [
+    {
+      "subject":  "wake_word.detected",
+      "priority": 5,
+      "effect":   "flash",
+      "color":    [255, 255, 255],
+      "params":   { "times": 2, "duration": 0.15 },
+      "then": {
+        "effect": "breathing",
+        "color":  [0, 255, 0]
+      }
+    }
+  ]
+}
+```
+
+### Campos da regra
+
+| Campo      | Tipo            | Obrigatório | Descrição                                               |
+|------------|-----------------|-------------|---------------------------------------------------------|
+| `subject`  | string          | ✅           | Subject NATS exato. Use `*` no final para prefix match.  |
+| `priority` | int (1–9)       | ✅           | Prioridade. Maior número interrompe menor.              |
+| `effect`   | string          | ✅           | Nome do efeito (ver tabela abaixo).                     |
+| `color`    | [R, G, B]       | ✅           | Cor base em RGB (0–255 cada).                           |
+| `params`   | object          | ❌           | Parâmetros extras do efeito.                            |
+| `then`     | rule object     | ❌           | Efeito a executar após o principal (para one-shots).    |
+
+### Efeitos disponíveis
+
+| Effect            | Loop? | Params                                    | Descrição                          |
+|-------------------|-------|-------------------------------------------|------------------------------------|
+| `solid`           | ♾️    | —                                         | Cor estática                       |
+| `breathing`       | ♾️    | `speed` (float, padrão 1.0)               | Fade in/out senoidal               |
+| `spinner`         | ♾️    | `tail` (int), `speed` (float)             | Cometa girando                     |
+| `strobe`          | ♾️    | `interval` (float)                        | Pisca rápido contínuo              |
+| `flash`           | 1x    | `times` (int), `duration` (float)         | Flashes rápidos                    |
+| `blink`           | 1x    | `times` (int), `on_ms`, `off_ms` (float)  | Pisca N vezes                      |
+| `fade_to`         | 1x    | `color_to` ([R,G,B]), `duration` (float)  | Transição linear de cor            |
+| `tts_audio_sync`  | ♾️    | `context_colors` (dict context→[R,G,B])   | Pulsa com amplitude do áudio TTS   |
+| `tts_audio_sync_stop` | 1x | —                                        | Para sync de áudio                 |
+
+> ⚠️ **Prioridades 10 e acima são reservadas** para overrides hardcoded do VFB (`error.*`, `security.intrusion`, `system.shutdown`). Nunca use prioridade 10 em regras registradas.
+
+### Exemplo — TTS Engine registrando regras de áudio sync
+
+```json
+{
+  "service": "tts-engine",
+  "rules": [
+    {
+      "subject":  "tts.speaking_started",
+      "priority": 7,
+      "effect":   "tts_audio_sync",
+      "color":    [0, 255, 0],
+      "params": {},
+      "context_colors": {
+        "normal":   [0, 255, 0],
+        "info":     [0, 150, 255],
+        "success":  [50, 255, 50],
+        "warning":  [255, 200, 0],
+        "alert":    [255, 120, 0],
+        "critical": [255, 0, 0],
+        "error":    [180, 0, 255],
+        "security": [255, 0, 0]
+      }
+    },
+    {
+      "subject":  "tts.speaking_stopped",
+      "priority": 6,
+      "effect":   "tts_audio_sync_stop",
+      "color":    [0, 150, 255]
+    }
+  ]
+}
+```
+
+### Redis — onde as regras ficam persistidas
+
+- **DB:** 3 (exclusivo do Visual Feedback — ver `infra/redis/README.md`)
+- **Key format:** `vfb:rules:{service_name}` (Hash: subject → JSON da regra)
+- **Consultar:** `redis-cli -n 3 HGETALL "vfb:rules:wake-word-detector"`
+
+---
+
 ## ⚙️ Configuração Dinâmica
 
 ### Arquivo de Configuração
