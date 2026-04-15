@@ -2,3 +2,4 @@ nats-py==2.7.2
 pyzmq==25.1.2
 numpy==1.26.4
 rpi-ws281x==5.0.0
+redis==5.0.4

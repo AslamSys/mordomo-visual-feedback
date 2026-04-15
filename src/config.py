@@ -12,6 +12,8 @@ class Config:
     led_invert: bool = os.getenv("LED_INVERT", "false").lower() == "true"
     led_channel: int = int(os.getenv("LED_CHANNEL", "0"))
     rms_threshold: float = float(os.getenv("RMS_THRESHOLD", "3000.0"))
+    # Redis — db3 é exclusivo do visual-feedback (ver infra/redis/README.md)
+    redis_url: str = os.getenv("REDIS_URL", "redis://redis:6379/3")
 
 
 config = Config()

@@ -1,72 +1,68 @@
 """
-Event handler — maps NATS subjects to LED effects via a priority queue.
-A running effect is cancelled only when a higher- or equal-priority event arrives.
+Event handler — dispatches NATS events to LED effects.
+
+Rule source priority:
+  1. Hardcoded overrides: error.* / security.* (always win, prio 10)
+  2. Dynamic rules from RuleRegistry (loaded from Redis db3)
+
+TTS audio sync (ZeroMQ) is activated/deactivated via the special
+"tts_audio_sync" effect name in a rule.
 """
 import asyncio
 import json
 import logging
 from typing import Coroutine
 
-from src import effects
+from src import effects as fx
 from src.led import LEDController
 from src.audio_sync import AudioSync
+from src.registry import RuleRegistry
 
 logger = logging.getLogger("visual-feedback.handlers")
 
-# Higher number = higher priority
-PRIORITY: dict[str, int] = {
+# Subjects that are ALWAYS handled here regardless of registry
+HARDCODED_OVERRIDES = {
+    "error.*":            10,
     "security.intrusion": 10,
-    "error":              10,   # prefix match for error.*
     "system.shutdown":     9,
-    "brain.processing":    8,
-    "tts.speaking_started": 7,
-    "conversation.started": 7,
-    "tts.speaking_stopped": 6,
-    "conversation.ended":   6,
-    "speaker.verified":     6,
-    "speaker.rejected":     3,
-    "wake_word.detected":   5,
-    "system.started":       1,
 }
 
-# Context colours for TTS (sent by Brain in tts.speaking_started payload)
-CONTEXT_COLORS: dict[str, tuple] = {
-    "normal":   (0, 255, 0),
-    "info":     (0, 150, 255),
-    "success":  (50, 255, 50),
-    "warning":  (255, 200, 0),
-    "alert":    (255, 120, 0),
-    "critical": (255, 0, 0),
-    "error":    (180, 0, 255),
-    "security": (255, 0, 0),
-}
-
-COLOR_BLUE  = (0, 150, 255)
-COLOR_GREEN = (0, 255, 0)
-COLOR_WHITE = (255, 255, 255)
-COLOR_RED   = (255, 0, 0)
+COLOR_RED    = (255, 0, 0)
 COLOR_PURPLE = (180, 0, 255)
+COLOR_BLUE   = (0, 150, 255)
+
+
+def _parse_color(value) -> tuple:
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return tuple(int(v) for v in value)
+    return (0, 255, 0)
 
 
 class EventHandler:
-    def __init__(self, led: LEDController, audio_sync: AudioSync):
+    def __init__(self, led: LEDController, audio_sync: AudioSync, registry: RuleRegistry):
         self._led = led
         self._audio_sync = audio_sync
+        self._registry = registry
         self._current_task: asyncio.Task | None = None
         self._current_priority: int = 0
         self._last_idle_color: tuple = COLOR_BLUE
 
     # ------------------------------------------------------------------
-    def _priority_for(self, subject: str) -> int:
+    def _hardcoded_priority(self, subject: str) -> int | None:
         if subject.startswith("error."):
-            return PRIORITY["error"]
-        return PRIORITY.get(subject, 0)
+            return 10
+        return HARDCODED_OVERRIDES.get(subject)
 
     # ------------------------------------------------------------------
     async def dispatch(self, subject: str, data: dict):
-        priority = self._priority_for(subject)
+        hw_prio = self._hardcoded_priority(subject)
 
-        # Only allow equal-or-higher priority to interrupt
+        if hw_prio is not None:
+            priority = hw_prio
+        else:
+            rule = self._registry.get(subject)
+            priority = rule.get("priority", 1) if rule else 0
+
         if (
             priority < self._current_priority
             and self._current_task
@@ -83,71 +79,108 @@ class EventHandler:
                 pass
 
         self._current_priority = priority
-        coro = self._build_effect(subject, data)
+        coro = self._build_effect(subject, data, hw_prio)
         if coro:
             self._current_task = asyncio.create_task(coro)
 
     # ------------------------------------------------------------------
-    def _build_effect(self, subject: str, data: dict) -> Coroutine | None:
+    def _build_effect(self, subject: str, data: dict, hw_prio: int | None) -> Coroutine | None:
         led = self._led
 
-        if subject == "system.started":
-            return effects.breathing(led, COLOR_BLUE, speed=0.5)
-
-        if subject == "wake_word.detected":
-            async def _wake():
-                await effects.flash(led, COLOR_WHITE, times=2, duration=0.15)
-                await effects.fade_to(led, (0, 0, 255), COLOR_GREEN, duration=0.3)
-                await effects.breathing(led, COLOR_GREEN, speed=1.0)
-            return _wake()
-
-        if subject == "speaker.verified":
-            self._last_idle_color = COLOR_GREEN
-            return effects.solid(led, COLOR_GREEN)
-
-        if subject == "speaker.rejected":
-            async def _rejected():
-                await effects.blink(led, COLOR_RED, times=2)
-                await effects.breathing(led, COLOR_BLUE, speed=0.5)
-            return _rejected()
-
-        if subject == "conversation.started":
-            self._last_idle_color = COLOR_GREEN
-            return effects.breathing(led, COLOR_GREEN, speed=1.0)
-
-        if subject == "brain.processing":
-            return effects.spinner(led, (255, 200, 0))
-
-        if subject == "tts.speaking_started":
-            context = data.get("context", "normal")
-            color = CONTEXT_COLORS.get(context, COLOR_GREEN)
-            self._audio_sync.set_base_color(color)
-            self._audio_sync.activate()
-            return effects.hold(led)  # audio_sync drives LEDs; we just hold priority
-
-        if subject == "tts.speaking_stopped":
-            self._audio_sync.deactivate()
-            return effects.breathing(led, self._last_idle_color, speed=0.8)
-
-        if subject == "conversation.ended":
-            self._last_idle_color = COLOR_BLUE
-            async def _ended():
-                await effects.fade_to(led, COLOR_GREEN, COLOR_BLUE, duration=0.5)
-                await effects.breathing(led, COLOR_BLUE, speed=0.5)
-            return _ended()
-
+        # ── Hardcoded overrides ─────────────────────────────────────────
         if subject.startswith("error."):
-            return effects.blink(led, COLOR_PURPLE, times=3, on_ms=0.2, off_ms=0.2)
+            return fx.blink(led, COLOR_PURPLE, times=3, on_ms=0.2, off_ms=0.2)
 
         if subject == "security.intrusion":
-            return effects.strobe(led, COLOR_RED, interval=0.1)
+            return fx.strobe(led, COLOR_RED, interval=0.1)
 
         if subject == "system.shutdown":
             async def _shutdown():
-                await effects.fade_to(led, self._last_idle_color, (0, 0, 0), duration=1.0)
+                await fx.fade_to(led, self._last_idle_color, (0, 0, 0), duration=1.0)
             return _shutdown()
 
-        return None
+        # ── Dynamic rules from registry ─────────────────────────────────
+        rule = self._registry.get(subject)
+        if not rule:
+            logger.debug(f"No rule for subject: {subject}")
+            return None
+
+        return self._effect_from_rule(rule, data)
+
+    # ------------------------------------------------------------------
+    def _effect_from_rule(self, rule: dict, data: dict) -> Coroutine | None:
+        led = self._led
+        effect_name = rule.get("effect", "solid")
+        color = _parse_color(rule.get("color", [0, 255, 0]))
+        params = dict(rule.get("params", {}))
+        then_rule = rule.get("then")
+
+        # Special effect: activate ZeroMQ audio sync
+        if effect_name == "tts_audio_sync":
+            context_colors: dict = rule.get("context_colors", {})
+
+            async def _tts_sync():
+                context = data.get("context", "normal")
+                base_color = _parse_color(context_colors.get(context, list(color)))
+                self._audio_sync.set_base_color(base_color)
+                self._audio_sync.activate()
+                await fx.hold(led)
+
+            return _tts_sync()
+
+        # Special effect: deactivate ZeroMQ audio sync
+        if effect_name == "tts_audio_sync_stop":
+            async def _tts_stop():
+                self._audio_sync.deactivate()
+                if then_rule:
+                    coro = self._effect_from_rule(then_rule, data)
+                    if coro:
+                        await coro
+                else:
+                    await fx.breathing(led, self._last_idle_color, speed=0.8)
+            return _tts_stop()
+
+        async def _run():
+            if effect_name == "solid":
+                self._last_idle_color = color
+                await fx.solid(led, color)
+
+            elif effect_name == "breathing":
+                self._last_idle_color = color
+                await fx.breathing(led, color, **params)
+
+            elif effect_name == "spinner":
+                await fx.spinner(led, color, **params)
+
+            elif effect_name == "strobe":
+                await fx.strobe(led, color, **params)
+
+            elif effect_name == "flash":
+                await fx.flash(led, color, **params)
+                if then_rule:
+                    coro = self._effect_from_rule(then_rule, data)
+                    if coro:
+                        await coro
+
+            elif effect_name == "blink":
+                await fx.blink(led, color, **params)
+                if then_rule:
+                    coro = self._effect_from_rule(then_rule, data)
+                    if coro:
+                        await coro
+
+            elif effect_name == "fade_to":
+                color_to = _parse_color(params.pop("color_to", list(color)))
+                await fx.fade_to(led, color, color_to, **params)
+                if then_rule:
+                    coro = self._effect_from_rule(then_rule, data)
+                    if coro:
+                        await coro
+
+            else:
+                logger.warning(f"Unknown effect: {effect_name}")
+
+        return _run()
 
     # ------------------------------------------------------------------
     async def on_event(self, msg):
@@ -158,3 +191,14 @@ class EventHandler:
             data = {}
         logger.info(f"← {subject}")
         await self.dispatch(subject, data)
+
+    async def on_register(self, msg):
+        """Handles visual.register — a service publishes its visual rules."""
+        try:
+            payload = json.loads(msg.data.decode())
+            service = payload.get("service", "unknown")
+            rules = payload.get("rules", [])
+            await self._registry.register_service(service, rules)
+            logger.info(f"Rules registered for service '{service}' ({len(rules)} rules)")
+        except Exception as e:
+            logger.error(f"Failed to process visual.register: {e}")

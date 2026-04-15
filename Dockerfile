@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     swig \
     && rm -rf /var/lib/apt/lists/*
 
+# Redis async client needs no native deps (pure Python fallback available)
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

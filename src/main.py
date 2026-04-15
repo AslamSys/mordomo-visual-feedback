@@ -6,6 +6,7 @@ import nats
 from src.config import config
 from src.led import LEDController
 from src.audio_sync import AudioSync
+from src.registry import RuleRegistry
 from src.handlers import EventHandler
 
 logging.basicConfig(
@@ -14,29 +15,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("visual-feedback")
 
-SUBSCRIPTIONS = [
-    "system.started",
-    "system.shutdown",
-    "wake_word.detected",
-    "speaker.verified",
-    "speaker.rejected",
-    "conversation.started",
-    "conversation.ended",
-    "brain.processing",
-    "tts.speaking_started",
-    "tts.speaking_stopped",
+# Hardcoded subjects that bypass the registry (always subscribed)
+HARDCODED_SUBJECTS = [
     "error.>",
     "security.intrusion",
+    "system.shutdown",
 ]
 
 
 async def main():
+    # ── Hardware ───────────────────────────────────────────────────────
     led = LEDController(config)
     await led.start()
 
     audio_sync = AudioSync(config, led)
-    handler = EventHandler(led, audio_sync)
 
+    # ── Registry (Redis db3) ───────────────────────────────────────────
+    registry = RuleRegistry(config.redis_url)
+    await registry.connect()
+    await registry.load_all()
+
+    handler = EventHandler(led, audio_sync, registry)
+
+    # ── NATS ───────────────────────────────────────────────────────────
     nc = await nats.connect(
         config.nats_url,
         error_cb=lambda e: logger.error(f"NATS error: {e}"),
@@ -45,11 +46,26 @@ async def main():
     )
     logger.info(f"Connected to NATS: {config.nats_url}")
 
-    for subject in SUBSCRIPTIONS:
+    # Subscribe to hardcoded overrides
+    for subject in HARDCODED_SUBJECTS:
         await nc.subscribe(subject, cb=handler.on_event)
 
-    # Boot animation
-    await handler.dispatch("system.started", {})
+    # Subscribe to all subjects currently registered in Redis
+    for subject in registry.all_subjects():
+        await nc.subscribe(subject, cb=handler.on_event)
+        logger.info(f"Subscribed (registry): {subject}")
+
+    # Listen for new service registrations at runtime
+    async def _on_register(msg):
+        prev_subjects = set(registry.all_subjects())
+        await handler.on_register(msg)
+        new_subjects = set(registry.all_subjects()) - prev_subjects
+        for subject in new_subjects:
+            await nc.subscribe(subject, cb=handler.on_event)
+            logger.info(f"Subscribed (new registration): {subject}")
+
+    await nc.subscribe("visual.register", cb=_on_register)
+    logger.info("Listening for visual.register from services")
 
     logger.info("Visual feedback service running.")
 
@@ -60,6 +76,7 @@ async def main():
     finally:
         audio_sync.deactivate()
         await nc.drain()
+        await registry.close()
         led.clear()
         logger.info("Shutdown complete.")
 
