@@ -17,9 +17,9 @@ logger = logging.getLogger("visual-feedback")
 
 # Hardcoded subjects that bypass the registry (always subscribed)
 HARDCODED_SUBJECTS = [
-    "error.>",
-    "security.intrusion",
-    "system.shutdown",
+    "mordomo.error.>",
+    "mordomo.security.intrusion",
+    "mordomo.system.shutdown",
 ]
 
 
