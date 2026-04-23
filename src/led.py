@@ -28,17 +28,21 @@ class LEDController:
         def _init():
             if not _HAS_HW:
                 return None
-            strip = PixelStrip(
-                cfg.led_count,
-                cfg.led_pin,
-                cfg.led_freq_hz,
-                cfg.led_dma,
-                cfg.led_invert,
-                cfg.led_brightness,
-                cfg.led_channel,
-            )
-            strip.begin()
-            return strip
+            try:
+                strip = PixelStrip(
+                    cfg.led_count,
+                    cfg.led_pin,
+                    cfg.led_freq_hz,
+                    cfg.led_dma,
+                    cfg.led_invert,
+                    cfg.led_brightness,
+                    cfg.led_channel,
+                )
+                strip.begin()
+                return strip
+            except Exception as e:
+                logger.error(f"Physical LED initialization failed ({e}). Falling back to mock mode.")
+                return None
 
         self._strip = await asyncio.to_thread(_init)
         logger.info(
